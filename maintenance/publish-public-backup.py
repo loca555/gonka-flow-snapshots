@@ -24,6 +24,19 @@ def checkpoint(database):
         return snapshot["height"], snapshot["hash"]
 
 
+async def verify_public_checkpoint(cfg, height, block_hash=None):
+    # GitHub can expose a new release before anonymous API caches see it.
+    for delay in (0, 8, 16, 32, 64):
+        await asyncio.sleep(delay)
+        with tempfile.TemporaryDirectory(prefix="flow-public-restore-") as tmp:
+            restored = Path(tmp) / "snapshot.sqlite3"
+            if await restore_fresh(restored, cfg):
+                observed_height, observed_hash = checkpoint(restored)
+                if observed_height == height and (block_hash is None or observed_hash == block_hash):
+                    return
+    raise ValueError("Published checkpoint could not be restored anonymously after retries")
+
+
 async def main(directory):
     if os.environ.get("GITHUB_REPOSITORY") != REPOSITORY:
         raise RuntimeError("Publisher must run in the dedicated snapshot repository")
@@ -53,12 +66,13 @@ async def main(directory):
                 tag = re.fullmatch(r"flow-snapshot-(\d+)-[0-9a-f]{12}", release["tag_name"])
                 names = {asset["name"] for asset in release.get("assets", []) if asset.get("state") == "uploaded"}
                 if tag and int(tag[1]) >= source[0] and names == {"manifest.json", "wgnk.sqlite3.gz"}:
-                    print(json.dumps({"published": False, "reason": "checkpoint_already_available", "height": int(tag[1])}))
+                    existing_height = int(tag[1])
+                    await verify_public_checkpoint(cfg, existing_height, source[1] if existing_height == source[0] else None)
+                    print(json.dumps({"published": False, "reason": "checkpoint_already_available",
+                                      "height": existing_height, "anonymousRestore": True}))
                     return
         height = await publish_snapshot(cfg, db, manifest["height"])
-        verified = Path(tmp) / "anonymous-restore.sqlite3"
-        if not await restore_fresh(verified, cfg) or checkpoint(verified) != source:
-            raise ValueError("Published snapshot did not restore anonymously")
+        await verify_public_checkpoint(cfg, *source)
         print(json.dumps({"published": True, "height": height, "anonymousRestore": True, "previousReleasesRetained": True}))
 
 
