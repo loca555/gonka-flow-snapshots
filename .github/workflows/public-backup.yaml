@@ -1,0 +1,52 @@
+# LOCAL TEMPLATE: intended only for loca555/gonka-flow-snapshots.
+# Publish after review to .github/workflows/public-backup.yaml together with
+# the two helper scripts under maintenance/. No workflow is installed by this file.
+name: Public Flow recovery snapshot
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish a verified public backup release
+        type: boolean
+        default: false
+  schedule:
+    - cron: '17 */6 * * *'
+permissions:
+  contents: write
+concurrency:
+  group: public-flow-backup
+  cancel-in-progress: false
+env:
+  FLOW_IMAGE: ghcr.io/loca555/gonka-flow-public@sha256:15278a2c34333ab76e4a40038cb4caac3a0773cd4625964d7a04ee5108d49bc7
+jobs:
+  snapshot:
+    if: github.repository == 'loca555/gonka-flow-snapshots' && github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || vars.FLOW_BACKUPS_ENABLED == 'true')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, verified27Oct2026
+        with:
+          persist-credentials: false
+      - name: Rebuild only from public archive and public RPC
+        run: |
+          sudo install -d -m 700 -o 10001 -g 10001 "$RUNNER_TEMP/flow-rebuild" "$RUNNER_TEMP/flow-publish" "$RUNNER_TEMP/public-backup"
+          docker pull "$FLOW_IMAGE"
+          docker run --rm --read-only --user 10001:10001 --cap-drop ALL \
+            --security-opt no-new-privileges --memory 1g --cpus 2 --pids-limit 128 \
+            --mount "type=bind,source=$RUNNER_TEMP/flow-rebuild,target=/tmp" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/maintenance/rebuild-public-backup.py,target=/opt/rebuild.py,readonly" \
+            --mount "type=bind,source=$RUNNER_TEMP/public-backup,target=/out" \
+            --entrypoint python "$FLOW_IMAGE" /opt/rebuild.py --output /out --max-advance 4000
+      - name: Publish draft only after complete restore and asset validation
+        if: (github.event_name == 'workflow_dispatch' && inputs.publish) || (github.event_name == 'schedule' && vars.FLOW_BACKUPS_ENABLED == 'true')
+        env:
+          BACKUP_GITHUB_TOKEN: ${{ github.token }}
+          FLOW_PUBLISH_APPROVED: 'true'
+        run: |
+          docker run --rm --read-only --user 10001:10001 --cap-drop ALL \
+            --security-opt no-new-privileges --memory 1g --pids-limit 128 \
+            --env BACKUP_GITHUB_TOKEN --env FLOW_PUBLISH_APPROVED --env GITHUB_REPOSITORY --env GITHUB_EVENT_NAME --env GITHUB_REF \
+            --mount "type=bind,source=$RUNNER_TEMP/flow-publish,target=/tmp" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/maintenance/publish-public-backup.py,target=/opt/publish.py,readonly" \
+            --mount "type=bind,source=$RUNNER_TEMP/public-backup,target=/backup,readonly" \
+            --entrypoint python "$FLOW_IMAGE" /opt/publish.py /backup
